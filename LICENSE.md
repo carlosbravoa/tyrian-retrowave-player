@@ -27,6 +27,5 @@ version 3 or later (GPL-3.0-or-later)**.
 You must supply your own `MUSIC.MUS` from a legitimate copy of Tyrian. The game
 data is not covered by this license and is not redistributed here.
 
-To obtain the full text of the GNU GPL, see <https://www.gnu.org/licenses/>.
-Consider adding the full `COPYING` (GPLv3) text to this repository before
-publishing it.
+The full text of the GNU GPL v3 is in [`COPYING`](COPYING) (from
+<https://www.gnu.org/licenses/gpl-3.0.txt>).
