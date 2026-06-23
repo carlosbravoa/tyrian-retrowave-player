@@ -222,7 +222,7 @@ static void viz_update(void)
 		// loudness, envelope and silence, so bars move with the actual sound
 		// and a keyed-but-inaudible channel reads ~0.
 		float amp = (float)opl_channel_level(ch);
-		amp = powf(amp, 0.6f);   // perceptual curve: use the meter's full range
+		amp = powf(amp, 0.55f);   // perceptual curve: use the meter's full range
 
 		int fnum = fmchip[0xA0 + ch] | ((fmchip[0xB0 + ch] & 3) << 8);
 		int block = (fmchip[0xB0 + ch] >> 2) & 7;

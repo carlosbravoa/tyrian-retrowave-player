@@ -116,7 +116,7 @@
  */
 typedef struct operator_struct {
 	Bit32s cval, lastcval;			// current output/last output (used for feedback)
-	Bit32s vu;						// tyrian-retrowave: peak |cval| since last probe read (visualizer)
+	Bit32s vmax, vmin;				// tyrian-retrowave: cval range since last probe (visualizer)
 	Bit32u tcount, wfpos, tinc;		// time (position in waveform) and time increment
 	fltype amp, step_amp;			// and amplification (envelope)
 	fltype vol;						// volume
@@ -359,9 +359,11 @@ void operator_output(op_type* op_pt, Bit32s modulator, Bit32s trem) {
 
 		op_pt->cval = (Bit32s)(op_pt->step_amp*op_pt->vol*op_pt->cur_wform[i&op_pt->cur_wmask]*trem/16.0);
 
-		// tyrian-retrowave: track peak magnitude for the visualizer
-		{ Bit32s a = op_pt->cval < 0 ? -op_pt->cval : op_pt->cval;
-		  if (a > op_pt->vu) op_pt->vu = a; }
+		// tyrian-retrowave: track output range (peak-to-peak) for the visualizer.
+		// A frozen/DC operator (keyed but no real pitch) has ~zero range and so
+		// reads as silent, instead of showing false activity.
+		if (op_pt->cval > op_pt->vmax) op_pt->vmax = op_pt->cval;
+		if (op_pt->cval < op_pt->vmin) op_pt->vmin = op_pt->cval;
 	}
 }
 
@@ -1633,8 +1635,9 @@ void adlib_getsample(Bit16s* sndptr, Bits numsamples) {
 double opl_channel_level(int ch)
 {
 	if (ch < 0 || 9 + ch >= (int)MAXOPERATORS) return 0.0;
-	Bit32s v = op[9 + ch].vu;
-	op[9 + ch].vu = 0;
-	double lv = v / 4096.0;          // ~4096 = loudest note's peak |cval|
+	op_type *o = &op[9 + ch];
+	double pp = (o->vmax > o->vmin) ? (double)(o->vmax - o->vmin) : 0.0;
+	o->vmax = -2000000000; o->vmin = 2000000000;   // reset peak-to-peak window
+	double lv = pp / 2800.0;         // calibrated so a loud note nears full scale
 	return lv > 1.0 ? 1.0 : lv;
 }
