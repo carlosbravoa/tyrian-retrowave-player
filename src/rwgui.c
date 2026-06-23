@@ -292,7 +292,6 @@ static int text_w(const char *t, int s) { return (int)strlen(t) * (FONT_W + 1) *
 
 enum { STYLE_LED, STYLE_NEON, STYLE_SPECTRUM, STYLE_COUNT };
 static int style = STYLE_LED;
-static const char *STYLE_NAME[] = { "LED VU", "NEON GLOW", "SPECTRUM" };
 
 static void fill(SDL_Renderer *r, int x, int y, int w, int h, RGB c, Uint8 a)
 {
@@ -375,13 +374,38 @@ static void output_label(char *buf, size_t n)
 	snprintf(buf, n, "%s", m);
 }
 
+// Key-off everything on the board so notes don't hang when we stop feeding it.
+static void board_silence(void)
+{
+	if (!retrowave_active) return;
+	for (int ch = 0; ch < 9; ++ch)
+		retrowave_write(0xB0 + ch, fmchip[0xB0 + ch] & ~0x20);
+	retrowave_write(0xBD, fmchip[0xBD] & ~0x1f);   // percussion off
+}
+
+// Push the full current register state to the board (used when re-enabling it).
+static void board_resync(void)
+{
+	if (!retrowave_active) return;
+	for (int r = 0; r < 256; ++r)
+		retrowave_write(r, fmchip[r]);
+}
+
 static void cycle_output(void)
 {
-	// PC -> BOARD -> BOTH -> PC  (BOARD/BOTH only if a board is open)
+	// PC -> BOARD -> BOTH -> PC  (BOARD/BOTH only if a board is open).
+	// Lock the audio device so the callback can't write to the board while we
+	// silence/resync it (avoids interleaved serial frames).
+	SDL_LockAudioDevice(audio_dev);
+	bool was_board = out_board;
 	if (out_pc && !out_board)      { out_pc = false; out_board = true; }
 	else if (!out_pc && out_board) { out_pc = true;  out_board = true; }
 	else                           { out_pc = true;  out_board = false; }
-	if ((out_board) && !retrowave_active) { out_board = false; out_pc = true; }  // no board
+	if (out_board && !retrowave_active) { out_board = false; out_pc = true; }  // no board
+
+	if (was_board && !out_board) board_silence();      // stopping feed -> kill notes
+	else if (!was_board && out_board) board_resync();  // resuming feed -> restore state
+	SDL_UnlockAudioDevice(audio_dev);
 }
 
 /* ------------------------------------------------------------------ */
@@ -417,7 +441,7 @@ static int g_nbtn;
 static int add_button(SDL_Renderer *ren, int x, int y, int h, const char *label,
                       int act, int mx, int my)
 {
-	int s = 2, pad = 10, w = text_w(label, s) + pad * 2;
+	int s = 2, pad = 6, w = text_w(label, s) + pad * 2;
 	bool hover = mx >= x && mx < x + w && my >= y && my < y + h;
 	fill(ren, x, y, w, h, hover ? (RGB){ 58, 64, 96 } : (RGB){ 34, 36, 54 }, 255);
 	SDL_SetRenderDrawColor(ren, 95, 105, 150, 255);
@@ -430,31 +454,81 @@ static int add_button(SDL_Renderer *ren, int x, int y, int h, const char *label,
 		g_btn[g_nbtn].act = act;
 		g_nbtn++;
 	}
-	return x + w + 8;
+	return x + w + 6;
+}
+
+// Filled triangle within (x,y,w,h); dir>0 points right, dir<0 points left.
+static void fill_tri(SDL_Renderer *r, int x, int y, int w, int h, int dir, RGB c)
+{
+	SDL_SetRenderDrawColor(r, c.r, c.g, c.b, 255);
+	for (int ry = 0; ry < h; ++ry)
+	{
+		float t = 1.0f - fabsf((ry - h / 2.0f) / (h / 2.0f));
+		int len = (int)(w * t + 0.5f);
+		if (len < 1) len = 1;
+		int lx = (dir > 0) ? x : x + (w - len);
+		SDL_Rect q = { lx, y + ry, len, 1 };
+		SDL_RenderFillRect(r, &q);
+	}
+}
+
+enum { ICON_PREV, ICON_PLAY, ICON_PAUSE, ICON_NEXT };
+
+// Draw a transport icon inside a centered square of side sz at (x,y).
+static void draw_icon(SDL_Renderer *ren, int type, int x, int y, int sz, RGB c)
+{
+	int g = sz * 6 / 10, gx = x + (sz - g) / 2, gy = y + (sz - g) / 2;
+	int bar = g / 4; if (bar < 2) bar = 2;
+	switch (type)
+	{
+	case ICON_PLAY:  fill_tri(ren, gx + g / 8, gy, g - g / 8, g, +1, c); break;
+	case ICON_PAUSE: fill(ren, gx + g / 8, gy, bar, g, c, 255);
+	                 fill(ren, gx + g - g / 8 - bar, gy, bar, g, c, 255); break;
+	case ICON_PREV:  fill(ren, gx, gy, bar, g, c, 255);
+	                 fill_tri(ren, gx + bar + 1, gy, g - bar - 1, g, -1, c); break;
+	case ICON_NEXT:  fill_tri(ren, gx, gy, g - bar - 1, g, +1, c);
+	                 fill(ren, gx + g - bar, gy, bar, g, c, 255); break;
+	}
+}
+
+static int add_icon_button(SDL_Renderer *ren, int x, int y, int h, int type, int act, int mx, int my)
+{
+	int w = h + 6;
+	bool hover = mx >= x && mx < x + w && my >= y && my < y + h;
+	fill(ren, x, y, w, h, hover ? (RGB){ 58, 64, 96 } : (RGB){ 34, 36, 54 }, 255);
+	SDL_SetRenderDrawColor(ren, 95, 105, 150, 255);
+	SDL_Rect b = { x, y, w, h };
+	SDL_RenderDrawRect(ren, &b);
+	draw_icon(ren, type, x + (w - h) / 2, y, h, (RGB){ 225, 230, 250 });
+	if (g_nbtn < (int)(sizeof(g_btn) / sizeof(g_btn[0])))
+	{
+		g_btn[g_nbtn].r = b; g_btn[g_nbtn].act = act; g_nbtn++;
+	}
+	return x + w + 6;
 }
 
 static void draw_controls(SDL_Renderer *ren, int W, int H)
 {
 	(void)W;
+	static const char *STYLE_SHORT[] = { "LED", "NEON", "SPEC" };
 	int mx, my;
 	SDL_GetMouseState(&mx, &my);
-	int by = H - 42, bh = 30, bx = 14;
+	int by = H - 38, bh = 28, bx = 12;
 	char b[32];
 	g_nbtn = 0;
-	bx = add_button(ren, bx, by, bh, "PREV", ACT_PREV, mx, my);
-	bx = add_button(ren, bx, by, bh, paused ? "PLAY" : "PAUSE", ACT_PLAY, mx, my);
-	bx = add_button(ren, bx, by, bh, "NEXT", ACT_NEXT, mx, my);
+	bx = add_icon_button(ren, bx, by, bh, ICON_PREV, ACT_PREV, mx, my);
+	bx = add_icon_button(ren, bx, by, bh, paused ? ICON_PLAY : ICON_PAUSE, ACT_PLAY, mx, my);
+	bx = add_icon_button(ren, bx, by, bh, ICON_NEXT, ACT_NEXT, mx, my);
 	bx = add_button(ren, bx, by, bh, "RESTART", ACT_RESTART, mx, my);
 	snprintf(b, sizeof b, "LOOP:%s", loop ? "ON" : "OFF");
 	bx = add_button(ren, bx, by, bh, b, ACT_LOOP, mx, my);
 	char out[8]; output_label(out, sizeof out);
-	snprintf(b, sizeof b, "OUT:%s", out);
-	bx = add_button(ren, bx, by, bh, b, ACT_OUTPUT, mx, my);
-	bx = add_button(ren, bx, by, bh, STYLE_NAME[style], ACT_STYLE, mx, my);
+	bx = add_button(ren, bx, by, bh, out, ACT_OUTPUT, mx, my);
+	bx = add_button(ren, bx, by, bh, STYLE_SHORT[style], ACT_STYLE, mx, my);
 	bx = add_button(ren, bx, by, bh, "T-", ACT_TDN, mx, my);
 	snprintf(b, sizeof b, "%d%%", tempo_pct);
 	draw_text(ren, bx + 2, by + (bh - FONT_H * 2) / 2, 2, (RGB){ 150, 170, 210 }, b);
-	bx += text_w(b, 2) + 10;
+	bx += text_w(b, 2) + 8;
 	add_button(ren, bx, by, bh, "T+", ACT_TUP, mx, my);
 }
 
@@ -531,7 +605,7 @@ int main(int argc, char *argv[])
 	recompute_timing();
 
 	SDL_Window *win = SDL_CreateWindow("Tyrian \xc2\xb7 RetroWave OPL3",
-		SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 960, 560,
+		SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 640, 373,
 		SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
 	SDL_Renderer *ren = SDL_CreateRenderer(win, -1,
 		SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
@@ -588,16 +662,16 @@ int main(int argc, char *argv[])
 
 		// background
 		fill(ren, 0, 0, W, H, (RGB){ 12, 12, 20 }, 255);
-		fill(ren, 0, 0, W, 70, (RGB){ 22, 22, 38 }, 255);
+		fill(ren, 0, 0, W, 38, (RGB){ 22, 22, 38 }, 255);
 
 		// header: song number + title
 		char line[160];
 		snprintf(line, sizeof line, "%02d/%02d  %s%s", cur_song + 1, song_count,
 		         song_name(cur_song), paused ? "   -PAUSED-" : "");
-		draw_text(ren, 16, 22, 3, (RGB){ 240, 240, 255 }, line);
+		draw_text(ren, 12, 12, 2, (RGB){ 240, 240, 255 }, line);
 
 		// visualizer area
-		int ax = 24, ay = 84, aw = W - 48, ah = H - 84 - 84;
+		int ax = 18, ay = 50, aw = W - 36, ah = H - 50 - 64;
 		fill(ren, ax - 6, ay - 6, aw + 12, ah + 12 + 26, (RGB){ 8, 8, 14 }, 255);
 		draw_bars(ren, ax, ay, aw, ah);
 
