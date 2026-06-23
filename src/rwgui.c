@@ -15,6 +15,7 @@
 #include <SDL.h>
 
 #include <math.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -217,23 +218,19 @@ static void viz_update(void)
 {
 	for (int ch = 0; ch < NCH; ++ch)
 	{
-		int base = op_table[ch];
-		int carrier_tl = fmchip[0x43 + base] & 0x3f;
-		float loud = (0x3f - carrier_tl) / 63.0f;          // note loudness from TL
-
-		// Real carrier envelope from the emulator: rises on attack, settles to
-		// sustain, falls on release -- so bars actually move with the sound.
-		float env = (float)opl_carrier_env(ch);
-		float amp = env * loud;
-		if (amp > 1) amp = 1;
+		// Real per-channel output level (peak |cval| since last frame): tracks
+		// loudness, envelope and silence, so bars move with the actual sound
+		// and a keyed-but-inaudible channel reads ~0.
+		float amp = (float)opl_channel_level(ch);
+		amp = powf(amp, 0.6f);   // perceptual curve: use the meter's full range
 
 		int fnum = fmchip[0xA0 + ch] | ((fmchip[0xB0 + ch] & 3) << 8);
 		int block = (fmchip[0xB0 + ch] >> 2) & 7;
 		float pitch = (block * 1024 + fnum) / (8.0f * 1024.0f);   // 0..1
 
 		VizChan *v = &viz[ch];
-		v->on = amp > 0.01f;
-		v->level += (amp - v->level) * (amp > v->level ? 0.6f : 0.25f);   // snappy
+		v->on = amp > 0.02f;
+		v->level += (amp - v->level) * (amp > v->level ? 0.6f : 0.20f);   // snappy
 		if (v->level < 0) v->level = 0;
 		if (v->level > v->peak) v->peak = v->level;
 		else v->peak -= 0.012f;
@@ -461,6 +458,9 @@ static void draw_controls(SDL_Renderer *ren, int W, int H)
 	add_button(ren, bx, by, bh, "T+", ACT_TUP, mx, my);
 }
 
+static volatile sig_atomic_t g_quit = 0;
+static void on_signal(int s) { (void)s; g_quit = 1; }
+
 static void handle_click(int x, int y)
 {
 	for (int i = 0; i < g_nbtn; ++i)
@@ -511,6 +511,10 @@ int main(int argc, char *argv[])
 	if (strcmp(dev, "-") != 0 && retrowave_open(dev)) { out_board = true; out_pc = false; }
 	else { out_board = false; out_pc = true; }
 
+	SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
+	signal(SIGINT, on_signal);
+	signal(SIGTERM, on_signal);
+
 	if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0)
 	{
 		fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
@@ -540,7 +544,7 @@ int main(int argc, char *argv[])
 
 	bool running = true;
 	long frame = 0;
-	while (running)
+	while (running && !g_quit)
 	{
 		SDL_Event e;
 		while (SDL_PollEvent(&e))

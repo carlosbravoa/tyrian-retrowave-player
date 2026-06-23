@@ -116,6 +116,7 @@
  */
 typedef struct operator_struct {
 	Bit32s cval, lastcval;			// current output/last output (used for feedback)
+	Bit32s vu;						// tyrian-retrowave: peak |cval| since last probe read (visualizer)
 	Bit32u tcount, wfpos, tinc;		// time (position in waveform) and time increment
 	fltype amp, step_amp;			// and amplification (envelope)
 	fltype vol;						// volume
@@ -357,6 +358,10 @@ void operator_output(op_type* op_pt, Bit32s modulator, Bit32s trem) {
 		// vol  : 1/2^14 to 1/2^29 (/0x4000; /1../0x8000)
 
 		op_pt->cval = (Bit32s)(op_pt->step_amp*op_pt->vol*op_pt->cur_wform[i&op_pt->cur_wmask]*trem/16.0);
+
+		// tyrian-retrowave: track peak magnitude for the visualizer
+		{ Bit32s a = op_pt->cval < 0 ? -op_pt->cval : op_pt->cval;
+		  if (a > op_pt->vu) op_pt->vu = a; }
 	}
 }
 
@@ -1620,11 +1625,16 @@ void adlib_getsample(Bit16s* sndptr, Bits numsamples) {
 }
 
 /* --- tyrian-retrowave addition (not part of the original DOSBox code) -------
- * Per-channel carrier envelope probe for the GUI visualizer.  Returns the
- * carrier operator's smoothed envelope amplitude (~0..1) for 2-op channel
- * `ch` (0..8), reflecting the live attack/decay/sustain/release state.       */
-double opl_carrier_env(int ch)
+ * Per-channel output-level probe for the GUI visualizer.  Returns the peak
+ * magnitude of the carrier operator's actual output (|cval|) since the last
+ * call, normalized to ~0..1, for 2-op channel `ch` (0..8).  Because it is the
+ * real oscillating output it tracks loudness, envelope and silence faithfully
+ * (a keyed-but-inaudible channel reads ~0).  Reading resets the peak window.  */
+double opl_channel_level(int ch)
 {
 	if (ch < 0 || 9 + ch >= (int)MAXOPERATORS) return 0.0;
-	return (double)op[9 + ch].step_amp;
+	Bit32s v = op[9 + ch].vu;
+	op[9 + ch].vu = 0;
+	double lv = v / 4096.0;          // ~4096 = loudest note's peak |cval|
+	return lv > 1.0 ? 1.0 : lv;
 }

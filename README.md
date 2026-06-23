@@ -42,9 +42,10 @@ carrier level). Three switchable styles:
 |---|---|---|
 | ![](docs/visualizer-led.png) | ![](docs/visualizer-neon.png) | ![](docs/visualizer-spectrum.png) |
 
-The bars track each channel's **real output envelope** read from the emulator,
-so they rise and fall with the actual sound (attack/decay/release), not just
-note on/off. Output is selectable at runtime: **PC**, **Board**, or **Both**;
+The bars track each channel's **real output level** read from the emulator
+(peak of the carrier's actual output), so they rise and fall with the actual
+sound, not just note on/off — a silent channel reads near zero even if a note
+is technically held. Output is selectable at runtime: **PC**, **Board**, or **Both**;
 if the board isn't connected it falls back to PC audio, so the app works on any
 machine.
 
@@ -90,8 +91,8 @@ redistributable and is not included here.
   the sample counter (as the original game does), fans the register stream out
   to the emulator (PC), the board, and the visualizer, and renders the bars.
 - `src/emu/opl.c` — DOSBox software OPL2/OPL3 emulator (GUI/PC audio only), with
-  a small appended `opl_carrier_env()` probe that exposes each channel's carrier
-  envelope for the visualizer.
+  a small appended `opl_channel_level()` probe (and a per-operator peak field)
+  that exposes each channel's real output level for the visualizer.
 - `src/compat/` — tiny stand-ins for the OpenTyrian headers `lds_play.c`
   includes, so the CLI needs no SDL.
 
