@@ -218,23 +218,27 @@ static void viz_update(void)
 	for (int ch = 0; ch < NCH; ++ch)
 	{
 		int base = op_table[ch];
-		bool on = (fmchip[0xB0 + ch] & 0x20) != 0;
 		int carrier_tl = fmchip[0x43 + base] & 0x3f;
-		float amp = on ? (0x3f - carrier_tl) / 63.0f : 0.0f;
+		float loud = (0x3f - carrier_tl) / 63.0f;          // note loudness from TL
+
+		// Real carrier envelope from the emulator: rises on attack, settles to
+		// sustain, falls on release -- so bars actually move with the sound.
+		float env = (float)opl_carrier_env(ch);
+		float amp = env * loud;
+		if (amp > 1) amp = 1;
 
 		int fnum = fmchip[0xA0 + ch] | ((fmchip[0xB0 + ch] & 3) << 8);
 		int block = (fmchip[0xB0 + ch] >> 2) & 7;
 		float pitch = (block * 1024 + fnum) / (8.0f * 1024.0f);   // 0..1
 
 		VizChan *v = &viz[ch];
-		v->on = on;
-		if (amp > v->level) v->level = amp;                     // instant attack
-		else v->level += (amp - v->level) * 0.12f;              // smooth release
+		v->on = amp > 0.01f;
+		v->level += (amp - v->level) * (amp > v->level ? 0.6f : 0.25f);   // snappy
 		if (v->level < 0) v->level = 0;
 		if (v->level > v->peak) v->peak = v->level;
-		else v->peak -= 0.010f;
+		else v->peak -= 0.012f;
 		if (v->peak < v->level) v->peak = v->level;
-		if (on) v->hue = pitch;
+		if (v->on) v->hue = pitch;
 	}
 }
 
@@ -383,6 +387,91 @@ static void cycle_output(void)
 	if ((out_board) && !retrowave_active) { out_board = false; out_pc = true; }  // no board
 }
 
+/* ------------------------------------------------------------------ */
+/* Actions (shared by keyboard and on-screen buttons).                 */
+/* ------------------------------------------------------------------ */
+
+enum { ACT_PREV, ACT_PLAY, ACT_NEXT, ACT_RESTART, ACT_LOOP,
+       ACT_OUTPUT, ACT_STYLE, ACT_TDN, ACT_TUP };
+
+static void do_action(int a)
+{
+	switch (a)
+	{
+	case ACT_PREV:    play_index(cur_song - 1); break;
+	case ACT_NEXT:    play_index(cur_song + 1); break;
+	case ACT_PLAY:    paused = !paused; break;
+	case ACT_RESTART: SDL_LockAudioDevice(audio_dev); lds_rewind();
+	                  samples_until_update = 0; SDL_UnlockAudioDevice(audio_dev); break;
+	case ACT_LOOP:    loop = !loop; break;
+	case ACT_OUTPUT:  cycle_output(); break;
+	case ACT_STYLE:   style = (style + 1) % STYLE_COUNT; break;
+	case ACT_TUP:     if (tempo_pct < 300) tempo_pct += 10; recompute_timing(); break;
+	case ACT_TDN:     if (tempo_pct > 20)  tempo_pct -= 10; recompute_timing(); break;
+	}
+}
+
+// On-screen buttons (immediate-mode): laid out + drawn each frame, hit-tested
+// against the previous frame's rects (layout only changes on resize).
+typedef struct { SDL_Rect r; int act; } Button;
+static Button g_btn[16];
+static int g_nbtn;
+
+static int add_button(SDL_Renderer *ren, int x, int y, int h, const char *label,
+                      int act, int mx, int my)
+{
+	int s = 2, pad = 10, w = text_w(label, s) + pad * 2;
+	bool hover = mx >= x && mx < x + w && my >= y && my < y + h;
+	fill(ren, x, y, w, h, hover ? (RGB){ 58, 64, 96 } : (RGB){ 34, 36, 54 }, 255);
+	SDL_SetRenderDrawColor(ren, 95, 105, 150, 255);
+	SDL_Rect b = { x, y, w, h };
+	SDL_RenderDrawRect(ren, &b);
+	draw_text(ren, x + pad, y + (h - FONT_H * s) / 2, s, (RGB){ 225, 230, 250 }, label);
+	if (g_nbtn < (int)(sizeof(g_btn) / sizeof(g_btn[0])))
+	{
+		g_btn[g_nbtn].r = b;
+		g_btn[g_nbtn].act = act;
+		g_nbtn++;
+	}
+	return x + w + 8;
+}
+
+static void draw_controls(SDL_Renderer *ren, int W, int H)
+{
+	(void)W;
+	int mx, my;
+	SDL_GetMouseState(&mx, &my);
+	int by = H - 42, bh = 30, bx = 14;
+	char b[32];
+	g_nbtn = 0;
+	bx = add_button(ren, bx, by, bh, "PREV", ACT_PREV, mx, my);
+	bx = add_button(ren, bx, by, bh, paused ? "PLAY" : "PAUSE", ACT_PLAY, mx, my);
+	bx = add_button(ren, bx, by, bh, "NEXT", ACT_NEXT, mx, my);
+	bx = add_button(ren, bx, by, bh, "RESTART", ACT_RESTART, mx, my);
+	snprintf(b, sizeof b, "LOOP:%s", loop ? "ON" : "OFF");
+	bx = add_button(ren, bx, by, bh, b, ACT_LOOP, mx, my);
+	char out[8]; output_label(out, sizeof out);
+	snprintf(b, sizeof b, "OUT:%s", out);
+	bx = add_button(ren, bx, by, bh, b, ACT_OUTPUT, mx, my);
+	bx = add_button(ren, bx, by, bh, STYLE_NAME[style], ACT_STYLE, mx, my);
+	bx = add_button(ren, bx, by, bh, "T-", ACT_TDN, mx, my);
+	snprintf(b, sizeof b, "%d%%", tempo_pct);
+	draw_text(ren, bx + 2, by + (bh - FONT_H * 2) / 2, 2, (RGB){ 150, 170, 210 }, b);
+	bx += text_w(b, 2) + 10;
+	add_button(ren, bx, by, bh, "T+", ACT_TUP, mx, my);
+}
+
+static void handle_click(int x, int y)
+{
+	for (int i = 0; i < g_nbtn; ++i)
+		if (x >= g_btn[i].r.x && x < g_btn[i].r.x + g_btn[i].r.w &&
+		    y >= g_btn[i].r.y && y < g_btn[i].r.y + g_btn[i].r.h)
+		{
+			do_action(g_btn[i].act);
+			return;
+		}
+}
+
 int main(int argc, char *argv[])
 {
 	const char *dev = "ttyACM0";
@@ -438,7 +527,7 @@ int main(int argc, char *argv[])
 	recompute_timing();
 
 	SDL_Window *win = SDL_CreateWindow("Tyrian \xc2\xb7 RetroWave OPL3",
-		SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 900, 540,
+		SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 960, 560,
 		SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
 	SDL_Renderer *ren = SDL_CreateRenderer(win, -1,
 		SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
@@ -457,19 +546,21 @@ int main(int argc, char *argv[])
 		while (SDL_PollEvent(&e))
 		{
 			if (e.type == SDL_QUIT) running = false;
+			else if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT)
+				handle_click(e.button.x, e.button.y);
 			else if (e.type == SDL_KEYDOWN)
 			{
 				switch (e.key.keysym.sym)
 				{
 				case SDLK_q: case SDLK_ESCAPE: running = false; break;
-				case SDLK_SPACE: paused = !paused; break;
-				case SDLK_n: case SDLK_RIGHT: play_index(cur_song + 1); break;
-				case SDLK_p: case SDLK_LEFT:  play_index(cur_song - 1); break;
+				case SDLK_SPACE: do_action(ACT_PLAY); break;
+				case SDLK_n: case SDLK_RIGHT: do_action(ACT_NEXT); break;
+				case SDLK_p: case SDLK_LEFT:  do_action(ACT_PREV); break;
 				case SDLK_r: SDL_LockAudioDevice(audio_dev); lds_rewind();
 				             samples_until_update = 0; SDL_UnlockAudioDevice(audio_dev); break;
-				case SDLK_l: loop = !loop; break;
-				case SDLK_o: cycle_output(); break;
-				case SDLK_v: style = (style + 1) % STYLE_COUNT; break;
+				case SDLK_l: do_action(ACT_LOOP); break;
+				case SDLK_o: do_action(ACT_OUTPUT); break;
+				case SDLK_v: do_action(ACT_STYLE); break;
 				case SDLK_EQUALS: case SDLK_PLUS: case SDLK_KP_PLUS:
 					if (tempo_pct < 300) tempo_pct += 10;
 					recompute_timing(); break;
@@ -495,24 +586,19 @@ int main(int argc, char *argv[])
 		fill(ren, 0, 0, W, H, (RGB){ 12, 12, 20 }, 255);
 		fill(ren, 0, 0, W, 70, (RGB){ 22, 22, 38 }, 255);
 
-		// header: song + transport state
-		char line[160], out[8];
-		output_label(out, sizeof out);
-		snprintf(line, sizeof line, "%02d/%02d  %s", cur_song + 1, song_count, song_name(cur_song));
-		draw_text(ren, 16, 12, 3, (RGB){ 240, 240, 255 }, line);
-		snprintf(line, sizeof line, "OUT:%s  TEMPO:%d%%  LOOP:%s  %s%s",
-		         out, tempo_pct, loop ? "ON" : "OFF", STYLE_NAME[style],
-		         paused ? "  -PAUSED-" : "");
-		draw_text(ren, 16, 44, 2, (RGB){ 150, 170, 210 }, line);
+		// header: song number + title
+		char line[160];
+		snprintf(line, sizeof line, "%02d/%02d  %s%s", cur_song + 1, song_count,
+		         song_name(cur_song), paused ? "   -PAUSED-" : "");
+		draw_text(ren, 16, 22, 3, (RGB){ 240, 240, 255 }, line);
 
 		// visualizer area
-		int ax = 24, ay = 96, aw = W - 48, ah = H - 96 - 56;
+		int ax = 24, ay = 84, aw = W - 48, ah = H - 84 - 84;
 		fill(ren, ax - 6, ay - 6, aw + 12, ah + 12 + 26, (RGB){ 8, 8, 14 }, 255);
 		draw_bars(ren, ax, ay, aw, ah);
 
-		// footer: help
-		draw_text(ren, 16, H - 26, 2, (RGB){ 110, 120, 150 },
-		          "SPACE PLAY  N/P SONG  L LOOP  +/- TEMPO  O OUTPUT  V STYLE  Q QUIT");
+		// clickable control bar
+		draw_controls(ren, W, H);
 
 		SDL_RenderPresent(ren);
 

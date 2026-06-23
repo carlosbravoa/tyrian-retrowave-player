@@ -37,6 +37,9 @@ void adlib_write_index(Bitu port, Bit8u val);
 // Set by the GUI before opl_init() is first reached (used by opl_init macro).
 extern int audioSampleRate;
 
+// Per-channel carrier envelope (~0..1) for the visualizer (added to opl.c).
+double opl_carrier_env(int ch);
+
 // GUI fan-out hooks, defined in rwgui.c.
 void rwgui_opl_init(void);
 void rwgui_opl_write(unsigned int reg, Bit8u val);

@@ -1618,3 +1618,13 @@ void adlib_getsample(Bit16s* sndptr, Bits numsamples) {
 
 	}
 }
+
+/* --- tyrian-retrowave addition (not part of the original DOSBox code) -------
+ * Per-channel carrier envelope probe for the GUI visualizer.  Returns the
+ * carrier operator's smoothed envelope amplitude (~0..1) for 2-op channel
+ * `ch` (0..8), reflecting the live attack/decay/sustain/release state.       */
+double opl_carrier_env(int ch)
+{
+	if (ch < 0 || 9 + ch >= (int)MAXOPERATORS) return 0.0;
+	return (double)op[9 + ch].step_amp;
+}
