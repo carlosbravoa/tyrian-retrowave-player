@@ -1,0 +1,11 @@
+# Build output
+/tyrian_rwplay
+*.o
+
+# Game data — not redistributable, supply your own
+*.mus
+*.MUS
+
+# Editor detritus
+*~
+*.swp
