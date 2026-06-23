@@ -6,8 +6,8 @@
 # different opl.h headers (compat/ routes opl_write straight to the emulator
 # stub; emu/ routes it through the GUI fan-out hook).
 
-SDL_CFLAGS := $(shell sdl2-config --cflags 2>/dev/null || pkg-config sdl2 --cflags)
-SDL_LIBS   := $(shell sdl2-config --libs   2>/dev/null || pkg-config sdl2 --libs)
+SDL_CFLAGS := $(shell sdl2-config --cflags 2>/dev/null || pkg-config --cflags sdl2 2>/dev/null)
+SDL_LIBS   := $(shell sdl2-config --libs   2>/dev/null || pkg-config --libs   sdl2 2>/dev/null)
 
 CC      ?= gcc
 CFLAGS  ?= -O2 -Wall -Wextra
@@ -16,7 +16,15 @@ COMMON  := -std=gnu11 -Isrc
 CLI_INC := $(COMMON) -Isrc/compat
 GUI_INC := $(COMMON) -Isrc/emu -Isrc/compat $(SDL_CFLAGS)
 
+# The CLI player (tyrian_rwplay) needs no SDL. The GUI (tyrian_rwgui) needs SDL2;
+# it is built by default only if SDL2 is detected, so a terminal-only user with
+# no SDL2 can just run `make` and get the CLI. `make tyrian_rwgui` forces it.
+ifeq ($(strip $(SDL_LIBS)),)
+all: tyrian_rwplay
+	@echo "Note: SDL2 not found — built CLI only. Install libsdl2-dev for the GUI (tyrian_rwgui)."
+else
 all: tyrian_rwplay tyrian_rwgui
+endif
 
 # ---- CLI player (no SDL, no emulator) -------------------------------------
 CLI_OBJS := build/cli/tyrian_rwplay.o build/cli/lds_play.o build/cli/retrowave_serial.o

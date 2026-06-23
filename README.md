@@ -23,10 +23,13 @@ There are two programs:
 ## Build
 
 ```sh
-make            # builds both; needs SDL2 for the GUI
+make            # builds the GUI too if SDL2 is present; otherwise CLI only
 ```
 
-`make tyrian_rwplay` builds only the dependency-free CLI player.
+**SDL2 is optional.** The CLI player (`tyrian_rwplay`) needs nothing but a C
+compiler and is fully independent of the GUI. `make` auto-detects SDL2: with it,
+both players build; without it, you get the CLI only (and a note). `make
+tyrian_rwplay` always builds just the CLI; `make tyrian_rwgui` forces the GUI.
 
 ## GUI player
 
