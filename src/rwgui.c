@@ -384,10 +384,17 @@ static void board_silence(void)
 }
 
 // Push the full current register state to the board (used when re-enabling it).
+// Order matters: all operator/channel config (incl. 0xC0 feedback/connection
+// and 0xE0 waveform) must be restored BEFORE the key-on (0xB0) and rhythm
+// (0xBD) triggers, or a sustained voice (e.g. an un-retriggered percussion
+// part) keeps playing with the wrong, default timbre.
 static void board_resync(void)
 {
 	if (!retrowave_active) return;
-	for (int r = 0; r < 256; ++r)
+	for (int r = 0; r < 256; ++r)            // pass 1: everything except freq/key-on/rhythm
+		if (r < 0xA0 || r > 0xBD)
+			retrowave_write(r, fmchip[r]);
+	for (int r = 0xA0; r <= 0xBD; ++r)       // pass 2: frequencies, then key-on / rhythm last
 		retrowave_write(r, fmchip[r]);
 }
 
