@@ -9,3 +9,5 @@
 # Editor detritus
 *~
 *.swp
+/tyrian_rwgui
+/build/
