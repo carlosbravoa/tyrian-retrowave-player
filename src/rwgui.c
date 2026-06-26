@@ -26,6 +26,7 @@
 #include "file.h"
 #include "opl.h"                 // emu/opl.h (hooked): opl_init/opl_write -> rwgui_opl_*
 #include "retrowave_serial.h"
+#include "midi_out.h"
 #include "font5x7.h"
 
 /* ------------------------------------------------------------------ */
@@ -50,6 +51,7 @@ void fread_die(void *buffer, size_t size, size_t count, FILE *stream)
 
 static bool out_pc = true;       // play emulator on PC speakers
 static bool out_board = false;   // stream to the RetroWave board
+static bool out_midi = false;    // a General MIDI port is open (toggle with 'm')
 
 static volatile uint8_t fmchip[256];          // register shadow for the visualizer
 static volatile int g_song_ended = 0;         // set by audio thread, cleared by main
@@ -59,6 +61,7 @@ void rwgui_opl_init(void)
 {
 	adlib_init((Bit32u)audioSampleRate);
 	memset((void *)fmchip, 0, sizeof(fmchip));
+	midi_reset();   // OPL reset -> drop any hanging MIDI notes/state
 }
 
 void rwgui_opl_write(unsigned int reg, Bit8u val)
@@ -66,6 +69,7 @@ void rwgui_opl_write(unsigned int reg, Bit8u val)
 	adlib_write(reg, val);
 	if (out_board && retrowave_active)
 		retrowave_write(reg, val);
+	midi_feed(reg, val);   // mirror to General MIDI (no-op unless a port is open)
 	if (reg < 256)
 		fmchip[reg] = val;
 }
@@ -117,7 +121,9 @@ static bool load_bank(const char *path)
 
 static void load_song(unsigned int n)
 {
-	lds_load(music_file, song_offset[n], song_offset[n + 1] - song_offset[n]);
+	unsigned int size = song_offset[n + 1] - song_offset[n];
+	lds_load(music_file, song_offset[n], size);
+	midi_out_set_song(music_file, song_offset[n], size);  // patch table for MIDI
 }
 
 static const char *song_name(int i)
@@ -370,7 +376,8 @@ static void draw_bars(SDL_Renderer *ren, int ax, int ay, int aw, int ah)
 
 static void output_label(char *buf, size_t n)
 {
-	const char *m = out_pc && out_board ? "BOTH" : out_board ? "BOARD" : "PC";
+	const char *m = out_pc && out_board ? "BOTH" : out_board ? "BOARD" :
+	                out_pc ? "PC" : "OFF";   // OFF = local audio off, MIDI-only
 	snprintf(buf, n, "%s", m);
 }
 
@@ -400,15 +407,31 @@ static void board_resync(void)
 
 static void cycle_output(void)
 {
-	// PC -> BOARD -> BOTH -> PC  (BOARD/BOTH only if a board is open).
+	// Cycle: PC -> BOARD -> BOTH -> [OFF] -> PC, each state encoded as
+	// (out_pc, out_board) below.  BOARD/BOTH are skipped without a board; OFF
+	// (local audio off, MIDI-only) is offered only when a --midi port is open.
+	// The emulator keeps running in every state to clock the driver/visualizer.
+	static const bool st_pc[]    = { true,  false, true,  false };
+	static const bool st_board[] = { false, true,  true,  false };
+	const int n = 4;
+
 	// Lock the audio device so the callback can't write to the board while we
 	// silence/resync it (avoids interleaved serial frames).
 	SDL_LockAudioDevice(audio_dev);
 	bool was_board = out_board;
-	if (out_pc && !out_board)      { out_pc = false; out_board = true; }
-	else if (!out_pc && out_board) { out_pc = true;  out_board = true; }
-	else                           { out_pc = true;  out_board = false; }
-	if (out_board && !retrowave_active) { out_board = false; out_pc = true; }  // no board
+
+	int cur = 0;
+	for (int i = 0; i < n; ++i)
+		if (st_pc[i] == out_pc && st_board[i] == out_board) { cur = i; break; }
+
+	for (int step = 1; step <= n; ++step)
+	{
+		int s = (cur + step) % n;
+		if (st_board[s] && !retrowave_active) continue;         // BOARD/BOTH need a board
+		if (!st_pc[s] && !st_board[s] && !out_midi) continue;   // OFF needs a MIDI port
+		out_pc = st_pc[s]; out_board = st_board[s];
+		break;
+	}
 
 	if (was_board && !out_board) board_silence();      // stopping feed -> kill notes
 	else if (!was_board && out_board) board_resync();  // resuming feed -> restore state
@@ -420,7 +443,16 @@ static void cycle_output(void)
 /* ------------------------------------------------------------------ */
 
 enum { ACT_PREV, ACT_PLAY, ACT_NEXT, ACT_RESTART, ACT_LOOP,
-       ACT_OUTPUT, ACT_STYLE, ACT_TDN, ACT_TUP };
+       ACT_OUTPUT, ACT_MIDI, ACT_STYLE, ACT_TDN, ACT_TUP };
+
+// Toggle MIDI under the audio lock: the callback (which calls midi_feed -> ALSA)
+// must not run while we flip the flag / send an all-notes-off from this thread.
+static void toggle_midi(void)
+{
+	SDL_LockAudioDevice(audio_dev);
+	midi_out_set_enabled(!midi_out_enabled());
+	SDL_UnlockAudioDevice(audio_dev);
+}
 
 static void do_action(int a)
 {
@@ -433,6 +465,7 @@ static void do_action(int a)
 	                  samples_until_update = 0; SDL_UnlockAudioDevice(audio_dev); break;
 	case ACT_LOOP:    loop = !loop; break;
 	case ACT_OUTPUT:  cycle_output(); break;
+	case ACT_MIDI:    toggle_midi(); break;
 	case ACT_STYLE:   style = (style + 1) % STYLE_COUNT; break;
 	case ACT_TUP:     if (tempo_pct < 300) tempo_pct += 10; recompute_timing(); break;
 	case ACT_TDN:     if (tempo_pct > 20)  tempo_pct -= 10; recompute_timing(); break;
@@ -531,6 +564,11 @@ static void draw_controls(SDL_Renderer *ren, int W, int H)
 	bx = add_button(ren, bx, by, bh, b, ACT_LOOP, mx, my);
 	char out[8]; output_label(out, sizeof out);
 	bx = add_button(ren, bx, by, bh, out, ACT_OUTPUT, mx, my);
+	if (out_midi)   // only shown when a MIDI port was opened (--midi)
+	{
+		snprintf(b, sizeof b, "MIDI:%s", midi_out_enabled() ? "ON" : "OFF");
+		bx = add_button(ren, bx, by, bh, b, ACT_MIDI, mx, my);
+	}
 	bx = add_button(ren, bx, by, bh, STYLE_SHORT[style], ACT_STYLE, mx, my);
 	bx = add_button(ren, bx, by, bh, "T-", ACT_TDN, mx, my);
 	snprintf(b, sizeof b, "%d%%", tempo_pct);
@@ -557,6 +595,7 @@ int main(int argc, char *argv[])
 {
 	const char *dev = "ttyACM0";
 	const char *bank = NULL;
+	const char *midi_port = NULL;   // --midi PORT: also send General MIDI there
 	int start = 1;
 	const char *shot_path = NULL;   // --shot FILE: save a BMP then quit (testing)
 	int shot_frame = 160;
@@ -564,6 +603,7 @@ int main(int argc, char *argv[])
 	for (int i = 1; i < argc; ++i)
 	{
 		if (!strcmp(argv[i], "-d") && i + 1 < argc) dev = argv[++i];
+		else if ((!strcmp(argv[i], "-m") || !strcmp(argv[i], "--midi")) && i + 1 < argc) midi_port = argv[++i];
 		else if (!strcmp(argv[i], "-s") && i + 1 < argc) start = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--shot") && i + 1 < argc) shot_path = argv[++i];
 		else if (!strcmp(argv[i], "--shot-frame") && i + 1 < argc) shot_frame = atoi(argv[++i]);
@@ -571,8 +611,10 @@ int main(int argc, char *argv[])
 		else if (!strcmp(argv[i], "-l")) loop = true;
 		else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help"))
 		{
-			printf("Usage: %s [-d DEV] [-s N] [-l] [MUSIC.MUS]\n"
+			printf("Usage: %s [-d DEV] [-m PORT] [-s N] [-l] [MUSIC.MUS]\n"
 			       "  -d DEV   RetroWave serial device (default ttyACM0; - = no board)\n"
+			       "  -m PORT  also send General MIDI to an ALSA seq port (e.g. 20:0;\n"
+			       "           '-' = open a port but don't auto-connect). Toggle with 'm'.\n"
 			       "  -s N     start at song N\n  -l       loop\n", argv[0]);
 			return 0;
 		}
@@ -591,6 +633,9 @@ int main(int argc, char *argv[])
 	// Open the board (optional). Default to board-only output if present.
 	if (strcmp(dev, "-") != 0 && retrowave_open(dev)) { out_board = true; out_pc = false; }
 	else { out_board = false; out_pc = true; }
+
+	// Open General MIDI output (optional). Independent of PC/board; toggle with 'm'.
+	if (midi_port) out_midi = midi_out_open(midi_port);
 
 	SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
 	signal(SIGINT, on_signal);
@@ -645,6 +690,7 @@ int main(int argc, char *argv[])
 				             samples_until_update = 0; SDL_UnlockAudioDevice(audio_dev); break;
 				case SDLK_l: do_action(ACT_LOOP); break;
 				case SDLK_o: do_action(ACT_OUTPUT); break;
+				case SDLK_m: if (out_midi) do_action(ACT_MIDI); break;
 				case SDLK_v: do_action(ACT_STYLE); break;
 				case SDLK_EQUALS: case SDLK_PLUS: case SDLK_KP_PLUS:
 					if (tempo_pct < 300) tempo_pct += 10;
@@ -703,6 +749,7 @@ int main(int argc, char *argv[])
 	SDL_PauseAudioDevice(audio_dev, 1);
 	if (retrowave_active) retrowave_reset();
 	retrowave_close();
+	midi_out_close();    // all-notes-off + close the ALSA port
 	SDL_CloseAudioDevice(audio_dev);
 	SDL_DestroyRenderer(ren);
 	SDL_DestroyWindow(win);

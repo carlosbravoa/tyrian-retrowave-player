@@ -29,6 +29,7 @@
 #include "file.h"
 #include "opl.h"
 #include "retrowave_serial.h"
+#include "midi_out.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -63,11 +64,13 @@ void adlib_init(Bit32u samplerate)
 {
 	(void)samplerate;
 	retrowave_reset();
+	midi_reset();          // OPL reset -> drop any hanging MIDI notes/state
 }
 
 void adlib_write(Bitu idx, Bit8u val)
 {
 	retrowave_write((unsigned int)idx, val);
+	midi_feed((unsigned int)idx, val);   // also mirror to General MIDI (if open)
 }
 
 void adlib_getsample(Bit16s *sndptr, Bits numsamples)
@@ -112,6 +115,7 @@ static void load_song(unsigned int n)
 {
 	unsigned int size = song_offset[n + 1] - song_offset[n];
 	lds_load(music_file, song_offset[n], size);
+	midi_out_set_song(music_file, song_offset[n], size);  // patch table for MIDI
 }
 
 /* ------------------------------------------------------------------ */
@@ -161,6 +165,8 @@ static void usage(const char *argv0)
 	printf("Usage: %s [OPTION...] [MUSIC.MUS]\n\n"
 	       "Stream Tyrian's music to a RetroWave OPL3 Express.\n\n"
 	       "  -d DEV    serial device (default ttyACM0; '-' = dry run, no hardware)\n"
+	       "  -m PORT   also send General MIDI to an ALSA seq port (e.g. 20:0, or a\n"
+	       "            port name; '-' = open a port but don't auto-connect)\n"
 	       "  -s N      start at song N (1-based)\n"
 	       "  -l        loop the current song instead of advancing\n"
 	       "  -h        show this help\n\n"
@@ -172,6 +178,7 @@ int main(int argc, char *argv[])
 {
 	const char *dev = "ttyACM0";
 	const char *bank_path = NULL;
+	const char *midi_port = NULL;
 	int start_song = 1;
 	bool loop = false;
 
@@ -179,6 +186,8 @@ int main(int argc, char *argv[])
 	{
 		if (!strcmp(argv[i], "-d") && i + 1 < argc)
 			dev = argv[++i];
+		else if ((!strcmp(argv[i], "-m") || !strcmp(argv[i], "--midi")) && i + 1 < argc)
+			midi_port = argv[++i];
 		else if (!strcmp(argv[i], "-s") && i + 1 < argc)
 			start_song = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "-l"))
@@ -217,6 +226,9 @@ int main(int argc, char *argv[])
 
 	if (!retrowave_open(dev))
 		return EXIT_FAILURE;
+
+	if (midi_port)
+		midi_out_open(midi_port);   // best-effort; warns and continues if it fails
 
 	if (start_song < 1) start_song = 1;
 	if (start_song > song_count) start_song = song_count;
@@ -302,6 +314,7 @@ int main(int argc, char *argv[])
 
 	retrowave_reset();   // silence any hanging notes
 	retrowave_close();
+	midi_out_close();    // all-notes-off + close the ALSA port
 	term_restore();
 	printf("\nbye.\n");
 	return 0;
