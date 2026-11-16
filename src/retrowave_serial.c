@@ -108,10 +108,13 @@ void retrowave_reset(void)
 	if (!retrowave_active)
 		return;
 
-	uint8_t lo[] = { RW_BOARD_OPL3, 0x12, 0xfe };
+	// Full (GPIOA, GPIOB) pairs, as the reference RetroWave library sends them: a real
+	// board also resets on the control byte alone, but pair-based decoders (FPGA
+	// implementations of the protocol) may ignore an incomplete pair.
+	uint8_t lo[] = { RW_BOARD_OPL3, 0x12, 0xfe, 0x00 };
 	rw_raw(lo, sizeof(lo));
 	rw_sleep_ms(10);
-	uint8_t hi[] = { RW_BOARD_OPL3, 0x12, 0xff };
+	uint8_t hi[] = { RW_BOARD_OPL3, 0x12, 0xff, 0x00 };
 	rw_raw(hi, sizeof(hi));
 	rw_sleep_ms(10);
 }
